@@ -5,7 +5,7 @@ from database import get_db, SessionLocal
 from models import Ticket, TicketStatus, Agent
 from schemas import TicketCreate, TicketUpdate, TicketResponse
 from datetime import datetime, timedelta
-from ws_manager import manager   
+from typing import List
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 
@@ -20,7 +20,7 @@ def assign_agent(db: Session) -> int:
         db.query(Agent.id, func.count(Ticket.id).label("active_tickets"))
         .outerjoin(Ticket, (Ticket.agent_id == Agent.id) & (Ticket.status != TicketStatus.closed))
         .group_by(Agent.id)
-        .order_by(func.count(Ticket.id).asc())  # ✅ fix ordering
+        .order_by(func.count(Ticket.id).asc())
         .first()
     )
     if not agent:
@@ -31,7 +31,6 @@ def assign_agent(db: Session) -> int:
 # ---------------- CREATE ----------------
 @router.post("/", response_model=TicketResponse, status_code=status.HTTP_201_CREATED)
 def create_ticket(ticket: TicketCreate, db: Session = Depends(get_db)):
-    # ✅ Auto-assign agent if not provided
     agent_id = ticket.agent_id if ticket.agent_id is not None else assign_agent(db)
 
     db_ticket = Ticket(
@@ -43,20 +42,22 @@ def create_ticket(ticket: TicketCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_ticket)
 
-    # 🔥 WebSocket notification
-    import asyncio
-    asyncio.create_task(manager.broadcast(f"🎫 Ticket created: {db_ticket.title} (ID {db_ticket.id})"))
-
     return db_ticket
 
 
-# ---------------- READ ----------------
+# ---------------- READ ONE ----------------
 @router.get("/{ticket_id}", response_model=TicketResponse)
 def get_ticket(ticket_id: int, db: Session = Depends(get_db)):
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     return ticket
+
+
+# ---------------- READ ALL ----------------
+@router.get("/", response_model=List[TicketResponse])
+def get_all_tickets(db: Session = Depends(get_db)):
+    return db.query(Ticket).all()
 
 
 # ---------------- UPDATE ----------------
@@ -72,10 +73,6 @@ def update_ticket(ticket_id: int, ticket: TicketUpdate, db: Session = Depends(ge
     db.commit()
     db.refresh(db_ticket)
 
-    # 🔥 WebSocket notification
-    import asyncio
-    asyncio.create_task(manager.broadcast(f"✏️ Ticket updated: {db_ticket.title} (ID {db_ticket.id})"))
-
     return db_ticket
 
 
@@ -89,16 +86,11 @@ def resolve_ticket(ticket_id: int, background_tasks: BackgroundTasks, db: Sessio
     if ticket.status == TicketStatus.closed:
         raise HTTPException(status_code=400, detail="Ticket already closed")
 
-    # Agent marks it pending customer approval
     ticket.status = TicketStatus.pending_customer
     db.commit()
     db.refresh(ticket)
 
-    # 🔥 WebSocket notification
-    import asyncio
-    asyncio.create_task(manager.broadcast(f"🕒 Ticket pending customer approval: {ticket.title} (ID {ticket.id})"))
-
-    # NOTE: BackgroundTasks runs immediately after response, not after 1 day.
+    # Run background task to auto-close after 1 day
     background_tasks.add_task(auto_close_ticket, ticket_id)
 
     return ticket
@@ -118,16 +110,12 @@ def approve_ticket(ticket_id: int, db: Session = Depends(get_db)):
     ticket.closed_at = datetime.utcnow()
     db.commit()
 
-    # 🔥 WebSocket notification
-    import asyncio
-    asyncio.create_task(manager.broadcast(f"✅ Ticket closed by customer: {ticket.title} (ID {ticket.id})"))
-
     return None  # ✅ 204 No Content
 
 
 # ---------------- AUTO CLOSE ----------------
 def auto_close_ticket(ticket_id: int):
-    db = SessionLocal()  # ✅ new session for background task
+    db = SessionLocal()
     try:
         ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
         if ticket and ticket.status == TicketStatus.pending_customer:
@@ -135,9 +123,5 @@ def auto_close_ticket(ticket_id: int):
                 ticket.status = TicketStatus.closed
                 ticket.closed_at = datetime.utcnow()
                 db.commit()
-
-                # 🔥 WebSocket notification
-                import asyncio
-                asyncio.run(manager.broadcast(f"⌛ Ticket auto-closed: {ticket.title} (ID {ticket.id})"))
     finally:
         db.close()

@@ -1,32 +1,17 @@
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from database import get_db
 from models import Agent, Ticket
 from schemas import AgentCreate, AgentUpdate, AgentResponse, TicketResponse
 from typing import List
-import json
 
 router = APIRouter(prefix="/agents", tags=["Agents"])
 
 
-# ---------- WebSocket helper ----------
-async def _ws_broadcast(event: str, payload: dict):
-    try:
-        from main import manager  # ⚠️ safest if moved to notifications.py later
-        message = json.dumps({"type": event, "data": payload}, default=str)
-        await manager.broadcast(message)
-    except Exception:
-        pass
-
-
 # ---------------- CREATE ----------------
 @router.post("/", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
-def create_agent(
-    agent: AgentCreate,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
-):
+def create_agent(agent: AgentCreate, db: Session = Depends(get_db)):
     # case-insensitive email check
     existing = db.query(Agent).filter(func.lower(Agent.email) == agent.email.lower()).first()
     if existing:
@@ -36,17 +21,6 @@ def create_agent(
     db.add(db_agent)
     db.commit()
     db.refresh(db_agent)
-
-    background_tasks.add_task(
-        _ws_broadcast,
-        "agent.created",
-        {
-            "id": db_agent.id,
-            "name": db_agent.name,
-            "email": db_agent.email,
-            "created_at": db_agent.created_at,
-        },
-    )
 
     return db_agent
 
@@ -68,12 +42,7 @@ def get_agent(agent_id: int, db: Session = Depends(get_db)):
 
 # ---------------- UPDATE ----------------
 @router.put("/{agent_id}", response_model=AgentResponse)
-def update_agent(
-    agent_id: int,
-    updated: AgentUpdate,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
+def update_agent(agent_id: int, updated: AgentUpdate, db: Session = Depends(get_db)):
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -98,39 +67,18 @@ def update_agent(
     db.commit()
     db.refresh(agent)
 
-    background_tasks.add_task(
-        _ws_broadcast,
-        "agent.updated",
-        {
-            "id": agent.id,
-            "name": agent.name,
-            "email": agent.email,
-            "created_at": agent.created_at,
-        },
-    )
-
     return agent
 
 
 # ---------------- DELETE ----------------
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_agent(
-    agent_id: int,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
+def delete_agent(agent_id: int, db: Session = Depends(get_db)):
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     db.delete(agent)
     db.commit()
-
-    background_tasks.add_task(
-        _ws_broadcast,
-        "agent.deleted",
-        {"id": agent_id},
-    )
 
     return None
 
